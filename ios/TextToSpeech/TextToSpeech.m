@@ -12,6 +12,9 @@
 
 #import "TextToSpeech.h"
 
+// Singleton instance for New Architecture compatibility
+static TextToSpeech *_sharedInstance = nil;
+
 @implementation TextToSpeech {
     NSString * _ignoreSilentSwitch;
 }
@@ -20,6 +23,11 @@
 
 RCT_EXPORT_MODULE()
 
++ (instancetype)sharedInstance
+{
+    return _sharedInstance;
+}
+
 -(NSArray<NSString *> *)supportedEvents
 {
     return @[@"tts-start", @"tts-finish", @"tts-pause", @"tts-resume", @"tts-progress", @"tts-cancel"];
@@ -27,12 +35,19 @@ RCT_EXPORT_MODULE()
 
 -(instancetype)init
 {
+    // If we already have a shared instance, return it instead of creating a new one
+    // This ensures singleton behavior in React Native New Architecture
+    if (_sharedInstance != nil) {
+        return _sharedInstance;
+    }
+    
     self = [super init];
     if (self) {
         _synthesizer = [AVSpeechSynthesizer new];
         _synthesizer.delegate = self;
         _ducking = false;
         _ignoreSilentSwitch = @"inherit"; // inherit, ignore, obey
+        _sharedInstance = self;
     }
 
     return self;
@@ -79,11 +94,16 @@ RCT_EXPORT_METHOD(speak:(NSString *)text
     }
 
     if([_ignoreSilentSwitch isEqualToString:@"ignore"]) {
+        // Build options based on ducking setting
+        AVAudioSessionCategoryOptions options = AVAudioSessionCategoryOptionInterruptSpokenAudioAndMixWithOthers;
+        if (_ducking) {
+            options |= AVAudioSessionCategoryOptionDuckOthers;
+        }
+        
         [[AVAudioSession sharedInstance]
          setCategory:AVAudioSessionCategoryPlayback
          mode:AVAudioSessionModeVoicePrompt
-         // This will pause a spoken audio like podcast or audiobook and duck the volume for music
-         options:AVAudioSessionCategoryOptionInterruptSpokenAudioAndMixWithOthers
+         options:options
          error:nil
         ];
     } else if([_ignoreSilentSwitch isEqualToString:@"obey"]) {
@@ -132,11 +152,11 @@ RCT_EXPORT_METHOD(resume:(RCTPromiseResolveBlock)resolve reject:(__unused RCTPro
 }
 
 
-RCT_EXPORT_METHOD(setDucking:(bool *)ducking
+RCT_EXPORT_METHOD(setDucking:(BOOL)ducking
                   resolve:(RCTPromiseResolveBlock)resolve
                   reject:(__unused RCTPromiseRejectBlock)reject)
 {
-    _ducking = ducking;
+    _ducking = (bool)ducking;
 
     if(ducking) {
         AVAudioSession *session = [AVAudioSession sharedInstance];
