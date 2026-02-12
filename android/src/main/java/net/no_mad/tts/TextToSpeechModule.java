@@ -1,6 +1,8 @@
 package net.no_mad.tts;
 
+import android.app.Activity;
 import android.content.ActivityNotFoundException;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
@@ -9,11 +11,12 @@ import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import android.net.Uri;
-import android.os.Build;
 import android.os.Bundle;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
 import android.speech.tts.Voice;
+
+import androidx.annotation.NonNull;
 
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.Promise;
@@ -26,47 +29,38 @@ import com.facebook.react.bridge.WritableMap;
 import com.facebook.react.modules.core.DeviceEventManagerModule;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.Locale;
-import java.util.Map;
+import java.util.Optional;
 
 public class TextToSpeechModule extends ReactContextBaseJavaModule {
 
     private TextToSpeech tts;
     private Boolean ready = null;
-    private ArrayList<Promise> initStatusPromises;
+    private final ArrayList<Promise> initStatusPromises;
 
     private boolean ducking = false;
-    private AudioManager audioManager;
-    private AudioManager.OnAudioFocusChangeListener afChangeListener = i -> {};
+    private final AudioManager audioManager;
+    private AudioFocusRequest audioFocusRequest = null;
 
-    private Map<String, Locale> localeCountryMap;
-    private Map<String, Locale> localeLanguageMap;
-
-    private AudioAttributes audioAttributes;
+    private final AudioAttributes audioAttributes;
 
     public TextToSpeechModule(ReactApplicationContext reactContext) {
         super(reactContext);
-        audioManager = (AudioManager) reactContext.getApplicationContext().getSystemService(reactContext.AUDIO_SERVICE);
+        audioManager = (AudioManager) reactContext.getApplicationContext().getSystemService(Context.AUDIO_SERVICE);
         audioAttributes = new AudioAttributes.Builder()
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                 .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
                 .build();
 
-        initStatusPromises = new ArrayList<Promise>();
-        //initialize ISO3, ISO2 languague country code mapping.
-        initCountryLanguageCodeMapping();
+        initStatusPromises = new ArrayList<>();
 
-        tts = new TextToSpeech(getReactApplicationContext(), new TextToSpeech.OnInitListener() {
-            @Override
-            public void onInit(int status) {
-                synchronized(initStatusPromises) {
-                    ready = (status == TextToSpeech.SUCCESS) ? Boolean.TRUE : Boolean.FALSE;
-                    for(Promise p: initStatusPromises) {
-                        resolveReadyPromise(p);
-                    }
-                    initStatusPromises.clear();
+        tts = new TextToSpeech(reactContext, status -> {
+            synchronized(initStatusPromises) {
+                ready = status == TextToSpeech.SUCCESS;
+                for(Promise p: initStatusPromises) {
+                    resolveReadyPromise(p);
                 }
+                initStatusPromises.clear();
             }
         });
 
@@ -85,7 +79,8 @@ public class TextToSpeechModule extends ReactContextBaseJavaModule {
                 @Override
                 public void onDone(String utteranceId) {
                     if(ducking) {
-                        audioManager.abandonAudioFocus(afChangeListener);
+                        audioManager.abandonAudioFocusRequest(audioFocusRequest);
+                        audioFocusRequest = null;
                     }
                     sendEvent("tts-finish", utteranceId);
                 }
@@ -93,7 +88,8 @@ public class TextToSpeechModule extends ReactContextBaseJavaModule {
                 @Override
                 public void onError(String utteranceId) {
                     if(ducking) {
-                        audioManager.abandonAudioFocus(afChangeListener);
+                        audioManager.abandonAudioFocusRequest(audioFocusRequest);
+                        audioFocusRequest = null;
                     }
                     sendEvent("tts-error", utteranceId);
                 }
@@ -101,7 +97,8 @@ public class TextToSpeechModule extends ReactContextBaseJavaModule {
                 @Override
                 public void onStop(String utteranceId, boolean interrupted) {
                     if(ducking) {
-                        audioManager.abandonAudioFocus(afChangeListener);
+                        audioManager.abandonAudioFocusRequest(audioFocusRequest);
+                        audioFocusRequest = null;
                     }
                     sendEvent("tts-cancel", utteranceId);
                 }
@@ -120,34 +117,10 @@ public class TextToSpeechModule extends ReactContextBaseJavaModule {
         }
     }
 
-    private void initCountryLanguageCodeMapping() {
-        String[] countries = Locale.getISOCountries();
-        localeCountryMap = new HashMap<String, Locale>(countries.length);
-        for (String country: countries) {
-            Locale locale = new Locale("", country);
-            localeCountryMap.put(locale.getISO3Country().toUpperCase(), locale);
-        }
-        String[] languages = Locale.getISOLanguages();
-        localeLanguageMap = new HashMap<String, Locale>(languages.length);
-        for (String language: languages) {
-            Locale locale = new Locale(language);
-            localeLanguageMap.put(locale.getISO3Language(), locale);
-        }
-    }
-
-    private String iso3CountryCodeToIso2CountryCode(String iso3CountryCode) {
-        return localeCountryMap.get(iso3CountryCode).getCountry();
-    }
-
-    private String iso3LanguageCodeToIso2LanguageCode(String iso3LanguageCode) {
-        return localeLanguageMap.get(iso3LanguageCode).getLanguage();
-    }
-
     private void resolveReadyPromise(Promise promise) {
         if (ready == Boolean.TRUE) {
             promise.resolve("success");
-        }
-        else {
+        } else {
             promise.reject("no_engine", "No TTS engine installed");
         }
     }
@@ -193,7 +166,7 @@ public class TextToSpeechModule extends ReactContextBaseJavaModule {
             default:
                 promise.reject("error", "Unknown error code: " + statusCode);
                 break;
-          }
+        }
     }
 
     private boolean isPackageInstalled(String packageName) {
@@ -206,6 +179,7 @@ public class TextToSpeechModule extends ReactContextBaseJavaModule {
         }
     }
 
+    @NonNull
     @Override
     public String getName() {
         return "TextToSpeech";
@@ -226,27 +200,17 @@ public class TextToSpeechModule extends ReactContextBaseJavaModule {
     public void speak(String utterance, ReadableMap params, Promise promise) {
         if(notReady(promise)) return;
 
-        if(ducking) {
-            int amResult;
+        if(ducking && audioFocusRequest == null) {
             // Request audio focus for playback
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-                AudioFocusRequest audioFocusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
-                        .setAudioAttributes(audioAttributes)
-                        .setAcceptsDelayedFocusGain(false)
-                        .setOnAudioFocusChangeListener(afChangeListener)
-                        .build();
+            audioFocusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                    .setAudioAttributes(audioAttributes)
+                    .setAcceptsDelayedFocusGain(false)
+                    .build();
 
-                amResult = audioManager.requestAudioFocus(audioFocusRequest);
-            } else {
-                amResult = audioManager.requestAudioFocus(afChangeListener,
-                        // Use the music stream.
-                        AudioManager.STREAM_MUSIC,
-                        // Request permanent focus.
-                        AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK);
-            }
+            int requestStatus = audioManager.requestAudioFocus(audioFocusRequest);
 
-            if(amResult != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-                promise.reject("Android AudioManager error, failed to request audio focus");
+            if(requestStatus != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+                promise.reject("request_focus_failed", "Android AudioManager error, failed to request audio focus");
                 return;
             }
         }
@@ -265,9 +229,9 @@ public class TextToSpeechModule extends ReactContextBaseJavaModule {
     public void setDefaultLanguage(String language, Promise promise) {
         if(notReady(promise)) return;
 
-        Locale locale = null;
+        Locale locale;
 
-        if(language.indexOf("-") != -1) {
+        if(language.contains("-")) {
             String[] parts = language.split("-");
             locale = new Locale(parts[0], parts[1]);
         } else {
@@ -275,10 +239,10 @@ public class TextToSpeechModule extends ReactContextBaseJavaModule {
         }
 
         try {
-          int result = tts.setLanguage(locale);
-          resolvePromiseWithStatusCode(result, promise);
+            int result = tts.setLanguage(locale);
+            resolvePromiseWithStatusCode(result, promise);
         } catch (Exception e) {
-          promise.reject("error", "Unknown error code");
+            promise.reject("error", "Unknown error code");
         }
     }
 
@@ -301,9 +265,9 @@ public class TextToSpeechModule extends ReactContextBaseJavaModule {
             // rate value will be in the range 0.0 to 1.0
             // let's convert it to the range of values Android platform expects,
             // where 1.0 is no change of rate and 2.0 is the twice faster rate
-            float androidRate = rate.floatValue() < 0.5f ?
-                    rate.floatValue() * 2 : // linear fit {0, 0}, {0.25, 0.5}, {0.5, 1}
-                    rate.floatValue() * 4 - 1; // linear fit {{0.5, 1}, {0.75, 2}, {1, 3}}
+            float androidRate = rate < 0.5f ?
+                    rate * 2 : // linear fit {0, 0}, {0.25, 0.5}, {0.5, 1}
+                    rate * 4 - 1; // linear fit {{0.5, 1}, {0.75, 2}, {1, 3}}
             int result = tts.setSpeechRate(androidRate);
             resolvePromiseWithStatusCode(result, promise);
         }
@@ -320,23 +284,19 @@ public class TextToSpeechModule extends ReactContextBaseJavaModule {
     public void setDefaultVoice(String voiceId, Promise promise) {
         if(notReady(promise)) return;
 
-        if (Build.VERSION.SDK_INT >= 21) {
-            try {
-                for(Voice voice: tts.getVoices()) {
-                    if(voice.getName().equals(voiceId)) {
-                        int result = tts.setVoice(voice);
-                        resolvePromiseWithStatusCode(result, promise);
-                        return;
-                    }
+        try {
+            for (Voice voice : tts.getVoices()) {
+                if (voice.getName().equals(voiceId)) {
+                    int result = tts.setVoice(voice);
+                    resolvePromiseWithStatusCode(result, promise);
+                    return;
                 }
-            } catch (Exception e) {
-              // Purposefully ignore exceptions here due to some buggy TTS engines.
-              // See http://stackoverflow.com/questions/26730082/illegalargumentexception-invalid-int-os-with-samsung-tts
             }
-            promise.reject("not_found", "The selected voice was not found");
-        } else {
-            promise.reject("not_available", "Android API 21 level or higher is required");
+        } catch (Exception e) {
+            // Purposefully ignore exceptions here due to some buggy TTS engines.
+            // See http://stackoverflow.com/questions/26730082/illegalargumentexception-invalid-int-os-with-samsung-tts
         }
+        promise.reject("not_found", "The selected voice was not found");
     }
 
     @ReactMethod
@@ -357,30 +317,28 @@ public class TextToSpeechModule extends ReactContextBaseJavaModule {
 
         WritableArray voiceArray = Arguments.createArray();
 
-        if (Build.VERSION.SDK_INT >= 21) {
-            try {
-                for(Voice voice: tts.getVoices()) {
-                    WritableMap voiceMap = Arguments.createMap();
-                    voiceMap.putString("id", voice.getName());
-                    voiceMap.putString("name", voice.getName());
+        try {
+            for (Voice voice : tts.getVoices()) {
+                WritableMap voiceMap = Arguments.createMap();
+                voiceMap.putString("id", voice.getName());
+                voiceMap.putString("name", voice.getName());
 
-                    String language = iso3LanguageCodeToIso2LanguageCode(voice.getLocale().getISO3Language());
-                    String country = voice.getLocale().getISO3Country();
-                    if(country != "") {
-                        language += "-" + iso3CountryCodeToIso2CountryCode(country);
-                    }
-
-                    voiceMap.putString("language", language);
-                    voiceMap.putInt("quality", voice.getQuality());
-                    voiceMap.putInt("latency", voice.getLatency());
-                    voiceMap.putBoolean("networkConnectionRequired", voice.isNetworkConnectionRequired());
-                    voiceMap.putBoolean("notInstalled", voice.getFeatures().contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED));
-                    voiceArray.pushMap(voiceMap);
+                String language = voice.getLocale().getLanguage();
+                String country = voice.getLocale().getCountry();
+                if (!country.isEmpty()) {
+                    language += "-" + country;
                 }
-            } catch (Exception e) {
-              // Purposefully ignore exceptions here due to some buggy TTS engines.
-              // See http://stackoverflow.com/questions/26730082/illegalargumentexception-invalid-int-os-with-samsung-tts
+
+                voiceMap.putString("language", language);
+                voiceMap.putInt("quality", voice.getQuality());
+                voiceMap.putInt("latency", voice.getLatency());
+                voiceMap.putBoolean("networkConnectionRequired", voice.isNetworkConnectionRequired());
+                voiceMap.putBoolean("notInstalled", voice.getFeatures().contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED));
+                voiceArray.pushMap(voiceMap);
             }
+        } catch (Exception e) {
+            // Purposefully ignore exceptions here due to some buggy TTS engines.
+            // See http://stackoverflow.com/questions/26730082/illegalargumentexception-invalid-int-os-with-samsung-tts
         }
 
         promise.resolve(voiceArray);
@@ -392,12 +350,12 @@ public class TextToSpeechModule extends ReactContextBaseJavaModule {
 
         if(isPackageInstalled(engineName)) {
             ready = null;
-            onCatalystInstanceDestroy();
+            invalidate();
             tts = new TextToSpeech(getReactApplicationContext(), new TextToSpeech.OnInitListener() {
                 @Override
                 public void onInit(int status) {
                     synchronized(initStatusPromises) {
-                        ready = (status == TextToSpeech.SUCCESS) ? Boolean.TRUE : Boolean.FALSE;
+                        ready = status == TextToSpeech.SUCCESS;
                         for(Promise p: initStatusPromises) {
                             resolveReadyPromise(p);
                         }
@@ -419,22 +377,20 @@ public class TextToSpeechModule extends ReactContextBaseJavaModule {
 
         WritableArray engineArray = Arguments.createArray();
 
-        if (Build.VERSION.SDK_INT >= 14) {
-            try {
-                String defaultEngineName = tts.getDefaultEngine();
-                for(TextToSpeech.EngineInfo engine: tts.getEngines()) {
-                    WritableMap engineMap = Arguments.createMap();
+        try {
+            String defaultEngineName = tts.getDefaultEngine();
+            for (TextToSpeech.EngineInfo engine : tts.getEngines()) {
+                WritableMap engineMap = Arguments.createMap();
 
-                    engineMap.putString("name", engine.name);
-                    engineMap.putString("label", engine.label);
-                    engineMap.putBoolean("default", engine.name.equals(defaultEngineName));
-                    engineMap.putInt("icon", engine.icon);
+                engineMap.putString("name", engine.name);
+                engineMap.putString("label", engine.label);
+                engineMap.putBoolean("default", engine.name.equals(defaultEngineName));
+                engineMap.putInt("icon", engine.icon);
 
-                    engineArray.pushMap(engineMap);
-                }
-            } catch (Exception e) {
-                promise.reject("error", "Unknown error code");
+                engineArray.pushMap(engineMap);
             }
+        } catch (Exception e) {
+            promise.reject("error", "Unknown error code");
         }
 
         promise.resolve(engineArray);
@@ -454,10 +410,12 @@ public class TextToSpeechModule extends ReactContextBaseJavaModule {
         Intent intent = new Intent(Intent.ACTION_VIEW);
         intent.setData(Uri.parse("market://details?id=com.google.android.tts"));
         try {
-            getCurrentActivity().startActivity(intent);
+            startActivity(intent);
             promise.resolve("success");
-        } catch (Exception e) {
+        } catch (ActivityNotFoundException e) {
             promise.reject("error", "Could not open Google Text to Speech App in the Play Store");
+        } catch (Exception e) {
+            promise.reject("unknown_error", e.getMessage());
         }
     }
 
@@ -466,24 +424,32 @@ public class TextToSpeechModule extends ReactContextBaseJavaModule {
         Intent intent = new Intent();
         intent.setAction(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA);
         try {
-            getCurrentActivity().startActivity(intent);
+            startActivity(intent);
             promise.resolve("success");
         } catch (ActivityNotFoundException e) {
             promise.reject("no_engine", "No TTS engine installed");
+        } catch (Exception e) {
+            promise.reject("unknown_error", e.getMessage());
         }
     }
 
     /**
-     * called on React Native Reloading JavaScript
-     * https://stackoverflow.com/questions/15563361/tts-leaked-serviceconnection
+     * <a href="https://stackoverflow.com/questions/15563361/tts-leaked-serviceconnection">called on React Native Reloading JavaScript</a>
      */
     @Override
-    public void onCatalystInstanceDestroy() {
-        super.onCatalystInstanceDestroy();
+    public void invalidate() {
         if(tts != null) {
             tts.stop();
             tts.shutdown();
         }
+    }
+
+    private void startActivity(Intent intent) {
+        Activity activity = getReactApplicationContext().getCurrentActivity();
+        if (activity == null) {
+            throw new ActivityNotFoundException();
+        }
+        activity.startActivity(intent);
     }
 
     private boolean notReady(Promise promise) {
@@ -491,69 +457,38 @@ public class TextToSpeechModule extends ReactContextBaseJavaModule {
             promise.reject("not_ready", "TTS is not ready");
             return true;
         }
-        else if(ready != Boolean.TRUE) {
+        else if(!ready) {
             resolveReadyPromise(promise);
             return true;
         }
         return false;
     }
 
-    @SuppressWarnings("deprecation")
     private int speak(String utterance, String utteranceId, ReadableMap inputParams) {
         String audioStreamTypeString = inputParams.hasKey("KEY_PARAM_STREAM") ? inputParams.getString("KEY_PARAM_STREAM") : "";
         float volume = inputParams.hasKey("KEY_PARAM_VOLUME") ? (float) inputParams.getDouble("KEY_PARAM_VOLUME") : 1.0f;
         float pan = inputParams.hasKey("KEY_PARAM_PAN") ? (float) inputParams.getDouble("KEY_PARAM_PAN") : 0.0f;
 
-        int audioStreamType;
-        switch(audioStreamTypeString) {
-            /*
-            // This has been added in API level 26, commenting out for now
-
-            case "STREAM_ACCESSIBILITY":
-                audioStreamType = AudioManager.STREAM_ACCESSIBILITY;
-                break;
-            */
-            case "STREAM_ALARM":
-                audioStreamType = AudioManager.STREAM_ALARM;
-                break;
-            case "STREAM_DTMF":
-                audioStreamType = AudioManager.STREAM_DTMF;
-                break;
-            case "STREAM_MUSIC":
-                audioStreamType = AudioManager.STREAM_MUSIC;
-                break;
-            case "STREAM_NOTIFICATION":
-                audioStreamType = AudioManager.STREAM_NOTIFICATION;
-                break;
-            case "STREAM_RING":
-                audioStreamType = AudioManager.STREAM_RING;
-                break;
-            case "STREAM_SYSTEM":
-                audioStreamType = AudioManager.STREAM_SYSTEM;
-                break;
-            case "STREAM_VOICE_CALL":
-                audioStreamType = AudioManager.STREAM_VOICE_CALL;
-                break;
-            default:
-                audioStreamType = AudioManager.USE_DEFAULT_STREAM_TYPE;
-        }
+        int audioStreamType = switch (Optional.ofNullable(audioStreamTypeString).orElse("")) {
+            case "STREAM_ACCESSIBILITY" -> AudioManager.STREAM_ACCESSIBILITY;
+            case "STREAM_ALARM" -> AudioManager.STREAM_ALARM;
+            case "STREAM_DTMF" -> AudioManager.STREAM_DTMF;
+            case "STREAM_MUSIC" -> AudioManager.STREAM_MUSIC;
+            case "STREAM_NOTIFICATION" -> AudioManager.STREAM_NOTIFICATION;
+            case "STREAM_RING" -> AudioManager.STREAM_RING;
+            case "STREAM_SYSTEM" -> AudioManager.STREAM_SYSTEM;
+            case "STREAM_VOICE_CALL" -> AudioManager.STREAM_VOICE_CALL;
+            default -> AudioManager.USE_DEFAULT_STREAM_TYPE;
+        };
 
         tts.setAudioAttributes(audioAttributes);
 
-        if (Build.VERSION.SDK_INT >= 21) {
-            Bundle params = new Bundle();
-            params.putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, audioStreamType);
-            params.putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, volume);
-            params.putFloat(TextToSpeech.Engine.KEY_PARAM_PAN, pan);
-            return tts.speak(utterance, TextToSpeech.QUEUE_ADD, params, utteranceId);
-        } else {
-            HashMap<String, String> params = new HashMap();
-            params.put(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, utteranceId);
-            params.put(TextToSpeech.Engine.KEY_PARAM_STREAM, String.valueOf(audioStreamType));
-            params.put(TextToSpeech.Engine.KEY_PARAM_VOLUME, String.valueOf(volume));
-            params.put(TextToSpeech.Engine.KEY_PARAM_PAN, String.valueOf(pan));
-            return tts.speak(utterance, TextToSpeech.QUEUE_ADD, params);
-        }
+        Bundle params = new Bundle();
+        params.putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, audioStreamType);
+        params.putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, volume);
+        params.putFloat(TextToSpeech.Engine.KEY_PARAM_PAN, pan);
+
+        return tts.speak(utterance, TextToSpeech.QUEUE_ADD, params, utteranceId);
     }
 
     private void sendEvent(String eventName, String utteranceId) {
@@ -567,7 +502,7 @@ public class TextToSpeechModule extends ReactContextBaseJavaModule {
                 .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
                 .emit(eventName, params);
     }
-    
+
     @ReactMethod
     public void removeListeners(Integer count) {
         // Keep: Required for RN built in Event Emitter Calls.
