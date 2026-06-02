@@ -1,8 +1,8 @@
 {
   "name": "@iternio/react-native-tts",
-  "version": "5.0.0",
+  "version": "5.0.1",
   "description": "React Native Text-To-Speech module for Android and iOS",
-  "main": "index.js",
+  "main": "index.ts",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Iternio-Planning-AB/react-native-tts.git"
@@ -20,8 +20,16 @@
   "author": "Manuel Auer <g4rb4g3@gmail.com> (https://github.com/g4rb4g3)",
   "license": "MIT",
   "homepage": "https://github.com/Iternio-Planning-AB/react-native-tts#readme",
-    "publishConfig": {
+  "publishConfig": {
     "registry": "https://registry.npmjs.org/",
     "access": "public"
-  }
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-native": ">=0.72"
+  },
+  "devDependencies": {
+    "react-native": "^0.85.3"
+  },
+  "dependencies": {}
 }
