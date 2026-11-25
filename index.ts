@@ -1,6 +1,8 @@
-import { NativeModules, NativeEventEmitter, Platform, EmitterSubscription, NativeModule } from 'react-native';
+import { NativeModules, NativeEventEmitter, Platform, EmitterSubscription } from 'react-native';
 
-interface TextToSpeechModule extends NativeModule {
+interface TextToSpeechModule {
+  addListener(eventType: string): void;
+  removeListeners(count: number): void;
   getInitStatus(): Promise<boolean>;
   requestInstallEngine(): Promise<boolean>;
   requestInstallData(): Promise<boolean>;
@@ -227,7 +229,7 @@ class Tts extends NativeEventEmitter {
   }
 
   addEventListener<T extends TtsEvents>(type: T, handler: TtsEventHandler<T>): EmitterSubscription {
-    return this.addListener(type, handler);
+    return this.addListener(type, handler as (...args: any[]) => void);
   }
 }
 
